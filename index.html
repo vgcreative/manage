@@ -60,17 +60,6 @@ import {
 import { createClient } from "@supabase/supabase-js";
 
 /* ────────────────────────────────────────────────────────────────────────
-   SUPABASE — shared data store (studio_data table, one row per owner_email)
-   Auth stays on Firebase; this is used purely as the database so bookings,
-   quotations, invoices etc. sync across devices/users instead of living in
-   a single browser's localStorage.
-   ──────────────────────────────────────────────────────────────────────── */
-const supabase = createClient(
-  "https://zegwpgvifwqvlnsjavxt.supabase.co",
-  "sb_publishable_i6GmJ4Pv1wsJhwvUzZpgiQ_bNjqQ1Rg"
-);
-
-/* ────────────────────────────────────────────────────────────────────────
    FIREBASE — auth backend
    ──────────────────────────────────────────────────────────────────────── */
 const firebaseConfig = {
@@ -85,6 +74,29 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const fbAuth = getAuth(firebaseApp);
 const googleProvider = new GoogleAuthProvider();
+
+/* ────────────────────────────────────────────────────────────────────────
+   SUPABASE — shared data store (studio_data table, one row per owner_email)
+   Auth stays on Firebase; this is used purely as the database so bookings,
+   quotations, invoices etc. sync across devices/users instead of living in
+   a single browser's localStorage.
+
+   The accessToken function below is what makes Supabase's Row Level
+   Security actually mean something: on every request, it fetches the
+   CURRENT signed-in Firebase user's ID token and hands it to Supabase.
+   Supabase (via the Firebase Third-Party Auth integration configured in
+   the dashboard) verifies that token and knows exactly who's asking —
+   instead of just seeing the bare public key, which any inspected page
+   reveals to anyone. Without this, RLS has no identity to check against. */
+const supabase = createClient(
+  "https://zegwpgvifwqvlnsjavxt.supabase.co",
+  "sb_publishable_i6GmJ4Pv1wsJhwvUzZpgiQ_bNjqQ1Rg",
+  {
+    accessToken: async () => {
+      return (await fbAuth.currentUser?.getIdToken(/* forceRefresh */ false)) ?? null;
+    },
+  }
+);
 
 /* Only these emails may access the studio dashboard. Checked right after
    every sign-in/sign-up, and again on every app boot (covers sessions that
@@ -3467,6 +3479,11 @@ export default function App() {
     // sign-in / sign-out, including across tab refreshes.
     const unsub = onAuthStateChanged(fbAuth, (user) => {
       if (user && isAllowedEmail(user.email)) {
+        // Force-refresh the ID token once on sign-in so a just-added
+        // "authenticated" role claim (see the one-time Firebase script)
+        // is picked up immediately, instead of waiting up to an hour for
+        // Firebase's normal token cache to expire.
+        user.getIdToken(/* forceRefresh */ true).catch(() => {});
         setAuthed(true); setEmail(user.email || "");
         setBooted(true);
       } else if (user) {

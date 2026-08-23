@@ -525,6 +525,19 @@ async function loadStudioData(email) {
     return null;
   }
 }
+/* Compares two data blobs for equality regardless of object-key order.
+   Needed because Postgres/JSONB doesn't preserve the key order we saved
+   with, so a plain JSON.stringify() comparison would see every echo of
+   our own save as "different" and re-trigger a save loop (the item
+   flashing/reappearing bug). Sorting keys before stringifying makes the
+   comparison order-independent. */
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => JSON.stringify(k) + ":" + stableStringify(value[k])).join(",")}}`;
+}
+
 async function saveStudioData(email, value) {
   try {
     const { error } = await supabase
@@ -3475,7 +3488,7 @@ export default function App() {
     (async () => {
       const savedData = await loadStudioData(email);
       const initial = savedData ? { gear: [], expenses: [], equipment: [], hires: [], ...savedData } : seedData();
-      lastSyncedRef.current = JSON.stringify(initial);
+      lastSyncedRef.current = stableStringify(initial);
       setData(initial);
     })();
   }, [authed, email]);
@@ -3487,7 +3500,7 @@ export default function App() {
   useEffect(() => {
     if (!authed || !email) return;
     const unsubscribe = subscribeToStudioData(email, (remoteData) => {
-      const json = JSON.stringify(remoteData);
+      const json = stableStringify(remoteData);
       if (json === lastSyncedRef.current) return; // our own save echoed back
       lastSyncedRef.current = json;
       setData({ gear: [], expenses: [], equipment: [], hires: [], ...remoteData });
@@ -3497,7 +3510,7 @@ export default function App() {
 
   useEffect(() => {
     if (!booted || !data || !email) return;
-    const json = JSON.stringify(data);
+    const json = stableStringify(data);
     if (json === lastSyncedRef.current) return; // came from remote, already in sync
     saveStudioData(email, data).then((ok) => {
       if (ok) lastSyncedRef.current = json;
@@ -4040,8 +4053,4 @@ import { createRoot } from "react-dom/client";
 createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
-</html>
-
-
-
 </html>

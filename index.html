@@ -1032,29 +1032,31 @@ function Dashboard({ data, onNavigate }) {
         </div>
       </div>
 
-      <BookingCalendar bookings={bookings} onNavigate={onNavigate} />
+      <div className="vg-dash-grid vg-dash-grid--cal">
+        <BookingCalendar bookings={bookings} onNavigate={onNavigate} />
 
-      <div className="vg-card">
-        <div className="vg-card-head"><div><h3>Upcoming</h3><p>Next confirmed shoots</p></div></div>
-        {bookings.filter(b => b.status === "reserved" || b.status === "confirmed").length === 0 ? (
-          <EmptyState icon={CalendarDays} title="Nothing on the books" body="Reserved shoots will appear here as soon as a booking is confirmed." />
-        ) : (
-          <div className="vg-mini-list">
-            {bookings.filter(b => b.status === "reserved" || b.status === "confirmed").map((b) => {
-              const c = clients.find((c) => c.id === b.clientId);
-              return (
-                <button type="button" className="vg-mini-row vg-mini-row--clickable" key={b.id} onClick={() => go("bookings", "upcoming")}>
-                  <div className="vg-mini-row-icon"><Clock3 size={15} /></div>
-                  <div className="vg-mini-row-main">
-                    <strong>{b.event}</strong>
-                    <span>{c ? c.name : "—"} · {b.location}</span>
-                  </div>
-                  <div className="vg-mini-row-date">{fmtDate(b.date)}</div>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <div className="vg-card">
+          <div className="vg-card-head"><div><h3>Upcoming</h3><p>Next confirmed shoots</p></div></div>
+          {bookings.filter(b => b.status === "reserved" || b.status === "confirmed").length === 0 ? (
+            <EmptyState icon={CalendarDays} title="Nothing on the books" body="Reserved shoots will appear here as soon as a booking is confirmed." />
+          ) : (
+            <div className="vg-mini-list">
+              {bookings.filter(b => b.status === "reserved" || b.status === "confirmed").map((b) => {
+                const c = clients.find((c) => c.id === b.clientId);
+                return (
+                  <button type="button" className="vg-mini-row vg-mini-row--clickable" key={b.id} onClick={() => go("bookings", "upcoming")}>
+                    <div className="vg-mini-row-icon"><Clock3 size={15} /></div>
+                    <div className="vg-mini-row-main">
+                      <strong>{b.event}</strong>
+                      <span>{c ? c.name : "—"} · {b.location}</span>
+                    </div>
+                    <div className="vg-mini-row-date">{fmtDate(b.date)}</div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1275,8 +1277,11 @@ function ClientsPage({ data, mutate, toast }) {
 
 /* =============================== SERVICES ================================= */
 
+const blankServiceForm = () => ({ name: "", category: "", description: "", price: "", duration: "", deposit: "" });
+
 function ServicesPage({ data, mutate, toast }) {
-  const [form, setForm] = useState({ name: "", category: "", price: "", duration: "", deposit: "" });
+  const [form, setForm] = useState(blankServiceForm());
+  const [editingId, setEditingId] = useState(null);
 
   const grouped = useMemo(() => {
     const map = {};
@@ -1284,29 +1289,48 @@ function ServicesPage({ data, mutate, toast }) {
     return map;
   }, [data.services]);
 
-  const add = () => {
+  const openEdit = (s) => {
+    setEditingId(s.id);
+    setForm({
+      name: s.name, category: s.category, description: s.description || "",
+      price: String(s.price), duration: s.duration || "", deposit: String(s.deposit || ""),
+    });
+  };
+
+  const cancelEdit = () => { setEditingId(null); setForm(blankServiceForm()); };
+
+  const save = () => {
     if (!form.name.trim() || !form.category.trim() || !form.price) {
       toast("Name, category and price are needed to add a service.");
       return;
     }
-    const rec = {
-      id: uid(), name: form.name.trim(), category: form.category.trim(),
+    const patch = {
+      name: form.name.trim(), category: form.category.trim(),
       description: form.description || "", price: Number(form.price) || 0,
       duration: form.duration || "—", deposit: Number(form.deposit) || 0,
     };
-    mutate((d) => ({ ...d, services: [...d.services, rec] }));
-    setForm({ name: "", category: "", price: "", duration: "", deposit: "" });
-    toast("Service added");
+    if (editingId) {
+      mutate((d) => ({ ...d, services: d.services.map((s) => s.id === editingId ? { ...s, ...patch } : s) }));
+      toast("Service updated");
+    } else {
+      mutate((d) => ({ ...d, services: [...d.services, { id: uid(), ...patch }] }));
+      toast("Service added");
+    }
+    cancelEdit();
   };
 
-  const remove = (id) => { mutate((d) => ({ ...d, services: d.services.filter((s) => s.id !== id) })); toast("Service removed"); };
+  const remove = (id) => {
+    mutate((d) => ({ ...d, services: d.services.filter((s) => s.id !== id) }));
+    if (editingId === id) cancelEdit();
+    toast("Service removed");
+  };
 
   return (
     <div className="vg-page">
       <PageHeader title="Services" subtitle="Packages, pricing and deposits" />
 
       <div className="vg-card">
-        <div className="vg-card-head"><h3>Add service</h3></div>
+        <div className="vg-card-head"><h3>{editingId ? "Edit service" : "Add service"}</h3></div>
         <div className="vg-add-service-grid">
           <input className="vg-input" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input className="vg-input" placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
@@ -1314,7 +1338,10 @@ function ServicesPage({ data, mutate, toast }) {
           <input className="vg-input" placeholder="Duration" value={form.duration} onChange={(e) => setForm({ ...form, duration: e.target.value })} />
           <input className="vg-input" placeholder="Deposit %" type="number" value={form.deposit} onChange={(e) => setForm({ ...form, deposit: e.target.value })} />
         </div>
-        <button className="vg-btn vg-btn--gold" onClick={add} style={{ marginTop: 14 }}><Plus size={16} />Add service</button>
+        <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+          <button className="vg-btn vg-btn--gold" onClick={save}><Plus size={16} />{editingId ? "Save changes" : "Add service"}</button>
+          {editingId && <button className="vg-btn vg-btn--ghost" onClick={cancelEdit}>Cancel</button>}
+        </div>
       </div>
 
       {Object.keys(grouped).length === 0 ? (
@@ -1325,7 +1352,10 @@ function ServicesPage({ data, mutate, toast }) {
           <div className="vg-service-grid">
             {items.map((s) => (
               <div className="vg-service-card" key={s.id}>
-                <button className="vg-icon-btn vg-service-remove" onClick={() => remove(s.id)}><Trash2 size={14} /></button>
+                <div className="vg-service-card-actions">
+                  <button className="vg-icon-btn" title="Edit service" onClick={() => openEdit(s)}><Pencil size={14} /></button>
+                  <button className="vg-icon-btn vg-icon-btn--danger" title="Delete service" onClick={() => remove(s.id)}><Trash2 size={14} /></button>
+                </div>
                 <div className="vg-service-name">{s.name}</div>
                 <div className="vg-service-desc">{s.description}</div>
                 <div className="vg-service-foot">
@@ -1574,6 +1604,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
                     <StatusSelect value={b.status} options={BOOKING_STATUSES} onChange={(v) => setStatus(b.id, v)} />
                   </div>
                   <div className="vg-td vg-td--actions">
+                    <button className="vg-icon-btn" title="Edit booking" onClick={() => openEdit(b)}><Pencil size={15} /></button>
                     <button className="vg-icon-btn vg-icon-btn--danger" title="Delete booking" onClick={() => remove(b)}><Trash2 size={15} /></button>
                   </div>
                 </div>
@@ -2250,6 +2281,13 @@ function ProjectsPage({ data, mutate, toast, filter, onFilterChange }) {
     setNewClient({ name: "", email: "", phone: "", type: "Individual" });
   };
 
+  const openEdit = (p) => {
+    setForm({ ...p });
+    setClientMode("existing");
+    setNewClient({ name: "", email: "", phone: "", type: "Individual" });
+    setModalOpen(true);
+  };
+
   const save = () => {
     if (!form.title.trim()) { toast("Give the project a title."); return; }
 
@@ -2320,6 +2358,7 @@ function ProjectsPage({ data, mutate, toast, filter, onFilterChange }) {
                   </div>
                   <div className="vg-project-head-right">
                     <StatusPill status={p.status} />
+                    <button className="vg-icon-btn" title="Edit project" onClick={() => openEdit(p)}><Pencil size={15} /></button>
                     <button className="vg-icon-btn vg-icon-btn--danger" title="Delete project" onClick={() => remove(p)}><Trash2 size={15} /></button>
                   </div>
                 </div>
@@ -2853,6 +2892,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
   const [payModal, setPayModal] = useState(null);
   const [payForm, setPayForm] = useState({ amount: "", date: todayISO(), note: "" });
   const [newModal, setNewModal] = useState(false);
+  const [editingInvoiceId, setEditingInvoiceId] = useState(null);
   const [viewInvoice, setViewInvoice] = useState(null);
   const [form, setForm] = useState(null);
   const [localFilter, setLocalFilter] = useState(filter || "all");
@@ -2874,6 +2914,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
   const openPay = (inv) => { setPayModal(inv); setPayForm({ amount: "", date: todayISO(), note: "" }); };
 
   const openNewInvoice = () => {
+    setEditingInvoiceId(null);
     setForm({
       clientId: data.clients[0]?.id || "",
       date: todayISO(),
@@ -2882,6 +2923,20 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
       items: [blankItem()],
     });
     setClientMode(data.clients.length ? "existing" : "new");
+    setNewClient(blankNewClient());
+    setNewModal(true);
+  };
+
+  const openEditInvoice = (inv) => {
+    setEditingInvoiceId(inv.id);
+    setForm({
+      clientId: inv.clientId,
+      date: inv.date,
+      dueDate: inv.dueDate || "",
+      notes: inv.notes || "",
+      items: (inv.items && inv.items.length ? inv.items : [blankItem()]).map((it) => ({ ...it })),
+    });
+    setClientMode("existing");
     setNewClient(blankNewClient());
     setNewModal(true);
   };
@@ -2912,12 +2967,30 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
     if (!clientId) { toast("Pick or add a client for this invoice."); return; }
     const items = form.items.filter((it) => it.description.trim() && Number(it.price) > 0);
     if (items.length === 0) { toast("Add at least one line item with a price."); return; }
+    const cleanItems = items.map((it) => ({ ...it, qty: Number(it.qty) || 1, price: Number(it.price) || 0 }));
+
+    if (editingInvoiceId) {
+      mutate((d) => ({
+        ...d,
+        invoices: d.invoices.map((inv) => {
+          if (inv.id !== editingInvoiceId) return inv;
+          const paid = Math.min(inv.paid, formTotal);
+          const status = paid >= formTotal ? "paid" : paid > 0 ? "partial" : "unpaid";
+          return { ...inv, clientId, date: form.date, dueDate: form.dueDate, notes: form.notes, items: cleanItems, total: formTotal, paid, status };
+        }),
+      }));
+      toast("Invoice updated");
+      setNewModal(false);
+      setEditingInvoiceId(null);
+      return;
+    }
+
     mutate((d) => {
       const number = `VGI-${String(d.invoiceSeq).padStart(6, "0")}`;
       const invoice = {
         id: uid(), number, clientId, total: formTotal, paid: 0,
         date: form.date, dueDate: form.dueDate, notes: form.notes,
-        items: items.map((it) => ({ ...it, qty: Number(it.qty) || 1, price: Number(it.price) || 0 })),
+        items: cleanItems,
         status: "unpaid", sent: false,
       };
       return {
@@ -3172,6 +3245,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
                       onClick={() => toggleSent(inv)}
                     ><Send size={15} /></button>
                     <button className="vg-icon-btn" title="Download PDF" onClick={() => downloadInvoice(inv)}><Download size={15} /></button>
+                    <button className="vg-icon-btn" title="Edit invoice" onClick={() => openEditInvoice(inv)}><Pencil size={15} /></button>
                     <button className="vg-btn vg-btn--sm" disabled={balance <= 0} onClick={() => openPay(inv)}>Record payment</button>
                     <button className="vg-icon-btn vg-icon-btn--danger" title="Delete invoice" onClick={() => removeInvoice(inv)}><Trash2 size={15} /></button>
                   </div>
@@ -3211,7 +3285,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
       </div>
 
       {/* ---- generate invoice ---- */}
-      <Modal open={newModal} onClose={() => setNewModal(false)} title="Generate invoice" width={620}>
+      <Modal open={newModal} onClose={() => { setNewModal(false); setEditingInvoiceId(null); }} title={editingInvoiceId ? "Edit invoice" : "Generate invoice"} width={620}>
         {form && (
           <div className="vg-form-grid">
             <ClientPicker
@@ -3259,7 +3333,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
               <strong className="vg-mono vg-amount">{fmtMoney(formTotal)}</strong>
             </div>
 
-            <button className="vg-btn vg-btn--gold vg-btn--block" onClick={createInvoice}>Generate invoice</button>
+            <button className="vg-btn vg-btn--gold vg-btn--block" onClick={createInvoice}>{editingInvoiceId ? "Save changes" : "Generate invoice"}</button>
           </div>
         )}
       </Modal>
@@ -3770,6 +3844,11 @@ const CSS = `
 @media (max-width: 980px) { .vg-dash-grid { grid-template-columns: 1fr; } }
 .vg-chart-wrap { margin-top: 4px; }
 
+/* ---------- dashboard: calendar + upcoming, side by side ---------- */
+.vg-dash-grid--cal { grid-template-columns: 0.95fr 1.05fr; align-items: start; }
+.vg-dash-grid--cal .vg-calendar-grid { max-width: 320px; margin-left: auto; margin-right: auto; }
+@media (max-width: 980px) { .vg-dash-grid--cal { grid-template-columns: 1fr; } .vg-dash-grid--cal .vg-calendar-grid { max-width: 360px; } }
+
 /* ---------- booking calendar ---------- */
 .vg-calendar-nav { display: flex; align-items: center; gap: 8px; }
 .vg-calendar-month { font-size: 13px; font-weight: 600; color: var(--c-text); min-width: 128px; text-align: center; }
@@ -3900,8 +3979,10 @@ const CSS = `
 @media (max-width: 600px) { .vg-service-grid { grid-template-columns: 1fr; } }
 .vg-service-card { position: relative; background: var(--c-bg-elev); border: 1px solid var(--c-border); border-radius: 13px; padding: 18px; transition: border-color 0.15s ease, transform 0.15s ease; }
 .vg-service-card:hover { border-color: var(--c-gold); transform: translateY(-2px); }
-.vg-service-remove { position: absolute; top: 10px; right: 10px; opacity: 0; transition: opacity 0.15s ease; width: 28px; height: 28px; }
-.vg-service-card:hover .vg-service-remove { opacity: 1; }
+.vg-service-card-actions { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; opacity: 0; transition: opacity 0.15s ease; }
+.vg-service-card-actions .vg-icon-btn { width: 28px; height: 28px; }
+.vg-service-card:hover .vg-service-card-actions { opacity: 1; }
+@media (hover: none) { .vg-service-card-actions { opacity: 1; } }
 .vg-service-name { font-family: 'Fraunces', serif; font-size: 16px; font-weight: 600; margin-bottom: 6px; padding-right: 20px; }
 .vg-service-desc { font-size: 12.5px; color: var(--c-muted); line-height: 1.5; min-height: 32px; }
 .vg-service-foot { display: flex; align-items: baseline; justify-content: space-between; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--c-border-soft); }

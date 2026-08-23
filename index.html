@@ -3497,7 +3497,7 @@ export default function App() {
   };
   const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
 
-  if (!booted) {
+  if (!booted || (authed && data === null)) {
     return (
       <div className="vg-root" data-theme={theme}>
         <style>{CSS}</style>
@@ -3995,4 +3995,6 @@ import { createRoot } from "react-dom/client";
 createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
+</html>
+
 </html>

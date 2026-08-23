@@ -56,6 +56,7 @@ import { initializeApp } from "firebase/app";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut as fbSignOut,
+  sendPasswordResetEmail,
 } from "firebase/auth";
 import { createClient } from "@supabase/supabase-js";
 
@@ -672,6 +673,7 @@ function LoginScreen({ onSignIn }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [resetSent, setResetSent] = useState(false);
 
   const submit = async (e) => {
     e && e.preventDefault();
@@ -713,6 +715,24 @@ function LoginScreen({ onSignIn }) {
         await fbSignOut(fbAuth);
         setError("This email doesn't have access to VG Creative Studio.");
       }
+    } catch (err) {
+      setError(friendlyAuthError(err.code));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const forgotPassword = async () => {
+    if (!email.trim()) {
+      setError("Enter your email above first, then tap \"Forgot password?\".");
+      return;
+    }
+    setError("");
+    setResetSent(false);
+    setBusy(true);
+    try {
+      await sendPasswordResetEmail(fbAuth, email.trim());
+      setResetSent(true);
     } catch (err) {
       setError(friendlyAuthError(err.code));
     } finally {
@@ -768,7 +788,21 @@ function LoginScreen({ onSignIn }) {
               value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password"
             />
           </Field>
+          {mode === "signin" && (
+            <button
+              type="button"
+              className="vg-link"
+              style={{ alignSelf: "flex-end", marginTop: "-6px" }}
+              onClick={forgotPassword}
+              disabled={busy}
+            >
+              Forgot password?
+            </button>
+          )}
 
+          {resetSent && (
+            <div className="vg-form-hint">Password reset email sent — check your inbox.</div>
+          )}
           {error && <div className="vg-form-error">{error}</div>}
 
           <button className="vg-btn vg-btn--gold vg-btn--block" type="submit" disabled={busy}>
@@ -3996,5 +4030,6 @@ createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
+
 
 </html>

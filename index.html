@@ -495,6 +495,7 @@ function seedData() {
     expenses: [],
     equipment: [],
     hires: [],
+    customCategories: { gear: [], equipment: [], expense: [] },
     invoiceSeq: 1,
     quoteSeq: 1,
     receiptSeq: 1,
@@ -625,6 +626,124 @@ function StatusSelect({ value, options, onChange }) {
       <ChevronDown size={15} className="vg-select-chevron" />
     </div>
   );
+}
+
+/* Category dropdown used for gear, equipment and expense categories.
+   Replaces the old fixed "Other" option: instead, picking "+ Add new
+   category" reveals a small inline input so the person can type their
+   own category, which is then saved to data.customCategories and shows
+   up in the dropdown (and in filters/breakdowns) everywhere else on the
+   site from then on. Custom categories can also be removed again via
+   "Manage categories" — built-in categories can't be deleted. */
+function CategorySelect({ value, builtIn, custom, onChange, onAddCategory, onDeleteCategory }) {
+  const [adding, setAdding] = useState(false);
+  const [managing, setManaging] = useState(false);
+  const [draft, setDraft] = useState("");
+  const customList = custom || [];
+  const options = useMemo(() => {
+    const list = [...builtIn, ...customList];
+    // Keep an existing-but-unlisted value selectable (e.g. legacy "Other" data).
+    if (value && !list.includes(value)) list.unshift(value);
+    return list;
+  }, [builtIn, customList, value]);
+
+  const handleChange = (v) => {
+    if (v === "__add_new__") {
+      setDraft("");
+      setAdding(true);
+      setManaging(false);
+      return;
+    }
+    if (v === "__manage__") {
+      setManaging(true);
+      setAdding(false);
+      return;
+    }
+    onChange(v);
+  };
+
+  const confirmAdd = () => {
+    const name = draft.trim();
+    if (!name) { setAdding(false); return; }
+    onAddCategory(name);
+    onChange(name);
+    setAdding(false);
+  };
+
+  const deleteCategory = (name) => {
+    if (!window.confirm(`Delete the "${name}" category? Items already using it will keep the label — it just won't be offered as a choice anymore.`)) return;
+    onDeleteCategory(name);
+  };
+
+  return (
+    <div className="vg-category-select">
+      <div className="vg-select-wrap">
+        <select className="vg-select" value={value} onChange={(e) => handleChange(e.target.value)}>
+          {options.map((o) => (
+            <option key={o} value={o}>{o}</option>
+          ))}
+          <option value="__add_new__">+ Add new category…</option>
+          {customList.length > 0 && <option value="__manage__">Manage categories…</option>}
+        </select>
+        <ChevronDown size={15} className="vg-select-chevron" />
+      </div>
+      {adding && (
+        <div className="vg-category-add-row">
+          <input
+            className="vg-input" autoFocus placeholder="New category name"
+            value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); confirmAdd(); }
+              if (e.key === "Escape") setAdding(false);
+            }}
+          />
+          <button type="button" className="vg-btn vg-btn--sm vg-btn--gold" onClick={confirmAdd}>Add</button>
+          <button type="button" className="vg-icon-btn" onClick={() => setAdding(false)} aria-label="Cancel"><X size={14} /></button>
+        </div>
+      )}
+      {managing && (
+        <div className="vg-category-manage">
+          {customList.length === 0 ? (
+            <div className="vg-cell-sub">No custom categories yet.</div>
+          ) : (
+            customList.map((c) => (
+              <div className="vg-category-manage-row" key={c}>
+                <span>{c}</span>
+                <button type="button" className="vg-icon-btn vg-icon-btn--danger" title={`Delete ${c}`} onClick={() => deleteCategory(c)}><Trash2 size={13} /></button>
+              </div>
+            ))
+          )}
+          <button type="button" className="vg-btn vg-btn--sm" onClick={() => setManaging(false)} style={{ alignSelf: "flex-start" }}>Done</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Appends a new custom category (deduped, ignoring case) to the given
+   bucket ("gear" | "equipment" | "expense") in customCategories. */
+function addCustomCategory(mutate, bucket, name) {
+  mutate((d) => {
+    const existing = (d.customCategories && d.customCategories[bucket]) || [];
+    if (existing.some((c) => c.toLowerCase() === name.toLowerCase())) return d;
+    return {
+      ...d,
+      customCategories: { ...(d.customCategories || {}), [bucket]: [...existing, name] },
+    };
+  });
+}
+
+/* Removes a custom category from the given bucket. Items that already used
+   it keep the stored string as-is (see CategorySelect's fallback logic) —
+   this only stops it being offered as a choice going forward. */
+function removeCustomCategory(mutate, bucket, name) {
+  mutate((d) => {
+    const existing = (d.customCategories && d.customCategories[bucket]) || [];
+    return {
+      ...d,
+      customCategories: { ...(d.customCategories || {}), [bucket]: existing.filter((c) => c !== name) },
+    };
+  });
 }
 
 function ClientSelect({ value, clients, onChange }) {
@@ -1194,6 +1313,8 @@ function Dashboard({ data, onNavigate }) {
     </div>
   );
 }
+
+const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function BookingCalendar({ bookings, onNavigate }) {
   const now = new Date();
@@ -1787,7 +1908,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
                 )}
                 {(form.expenses || []).map((e) => (
                   <div className="vg-booking-expense-row" key={e.id}>
-                    <StatusSelect value={e.category} options={EXPENSE_CATEGORIES} onChange={(v) => updateExpenseRow(e.id, { category: v })} />
+                    <CategorySelect value={e.category} builtIn={EXPENSE_CATEGORIES} custom={data.customCategories?.expense} onChange={(v) => updateExpenseRow(e.id, { category: v })} onAddCategory={(name) => addCustomCategory(mutate, "expense", name)} onDeleteCategory={(name) => removeCustomCategory(mutate, "expense", name)} />
                     <input className="vg-input" placeholder="Description" value={e.description} onChange={(ev) => updateExpenseRow(e.id, { description: ev.target.value })} />
                     <input className="vg-input" type="number" placeholder="Amount" value={e.amount} onChange={(ev) => updateExpenseRow(e.id, { amount: ev.target.value })} />
                     <button className="vg-icon-btn vg-icon-btn--danger" title="Remove expense" onClick={() => removeExpenseRow(e.id)}><Trash2 size={15} /></button>
@@ -1816,7 +1937,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
    gimbal is a real problem, and this is what surfaces it. */
 
 const blankGear = () => ({ id: null, name: "", category: "Camera", qtyOwned: 1 });
-const GEAR_CATEGORIES = ["Camera", "Lens", "Lighting", "Audio", "Stabiliser", "Other"];
+const GEAR_CATEGORIES = ["Camera", "Lens", "Lighting", "Audio","Gimbal"];
 
 function GearPage({ data, mutate, toast }) {
   const [modalOpen, setModalOpen] = useState(false);
@@ -1906,7 +2027,7 @@ function GearPage({ data, mutate, toast }) {
           <div className="vg-form-grid">
             <Field label="Name"><input className="vg-input" placeholder="e.g. DJI Ronin gimbal" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
             <Field label="Category">
-              <StatusSelect value={form.category} options={GEAR_CATEGORIES} onChange={(v) => setForm({ ...form, category: v })} />
+              <CategorySelect value={form.category} builtIn={GEAR_CATEGORIES} custom={data.customCategories?.gear} onChange={(v) => setForm({ ...form, category: v })} onAddCategory={(name) => addCustomCategory(mutate, "gear", name)} onDeleteCategory={(name) => removeCustomCategory(mutate, "gear", name)} />
             </Field>
             <Field label="Quantity owned"><input className="vg-input" type="number" min={1} value={form.qtyOwned} onChange={(e) => setForm({ ...form, qtyOwned: e.target.value })} /></Field>
             <button className="vg-btn vg-btn--gold vg-btn--block" onClick={save}>{form.id ? "Save changes" : "Add gear"}</button>
@@ -1927,7 +2048,7 @@ function GearPage({ data, mutate, toast }) {
       and it's always for the full amount up front — no partial deposit,
       the equipment doesn't go out until it's paid in full. */
 
-const EQUIPMENT_CATEGORIES = ["Camera", "Lens", "Lighting", "Audio", "Stabiliser", "Other"];
+const EQUIPMENT_CATEGORIES = ["Camera", "Lens", "Lighting", "Audio", "Stabiliser"];
 const EQUIPMENT_STATUSES = ["available", "out", "maintenance"];
 const HIRE_STATUSES = ["reserved", "out", "returned"];
 const MAX_EQUIPMENT_PHOTOS = 4;
@@ -2296,7 +2417,7 @@ function EquipmentPage({ data, mutate, toast }) {
             </Field>
             <Field label="Equipment name"><input className="vg-input" placeholder="e.g. Canon R5 + 24-70mm kit" value={equipForm.name} onChange={(e) => setEquipForm({ ...equipForm, name: e.target.value })} /></Field>
             <Field label="Category">
-              <StatusSelect value={equipForm.category} options={EQUIPMENT_CATEGORIES} onChange={(v) => setEquipForm({ ...equipForm, category: v })} />
+              <CategorySelect value={equipForm.category} builtIn={EQUIPMENT_CATEGORIES} custom={data.customCategories?.equipment} onChange={(v) => setEquipForm({ ...equipForm, category: v })} onAddCategory={(name) => addCustomCategory(mutate, "equipment", name)} onDeleteCategory={(name) => removeCustomCategory(mutate, "equipment", name)} />
             </Field>
             <div className="vg-form-row">
               <Field label="Daily rate (Ksh)"><input className="vg-input" type="number" min={0} value={equipForm.dailyRate} onChange={(e) => setEquipForm({ ...equipForm, dailyRate: e.target.value })} /></Field>
@@ -2559,7 +2680,7 @@ function ProjectsPage({ data, mutate, toast, filter, onFilterChange }) {
    can show actual profit (revenue collected minus what a shoot cost) rather
    than treating "revenue collected" as if it were profit. */
 
-const EXPENSE_CATEGORIES = ["Gear hire", "Crew", "Transport", "Location", "Other"];
+const EXPENSE_CATEGORIES = ["Gear hire", "Crew", "Transport", "Location"];
 const blankExpense = () => ({ id: null, category: "Gear hire", description: "", amount: "", date: todayISO(), projectId: "" });
 
 function ProjectSelect({ value, projects, onChange }) {
@@ -2614,11 +2735,12 @@ function ExpensesPage({ data, mutate, toast }) {
     const totalCost = data.expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
     const revenueCollected = data.invoices.reduce((s, i) => s + Number(i.paid || 0), 0);
     const netProfit = revenueCollected - totalCost;
-    const byCategory = EXPENSE_CATEGORIES.map((cat) => ({
+    const allCategories = [...EXPENSE_CATEGORIES, ...(data.customCategories?.expense || [])];
+    const byCategory = allCategories.map((cat) => ({
       cat, value: data.expenses.filter((e) => e.category === cat).reduce((s, e) => s + Number(e.amount || 0), 0),
     })).filter((c) => c.value > 0);
     return { totalCost, revenueCollected, netProfit, byCategory };
-  }, [data.expenses, data.invoices]);
+  }, [data.expenses, data.invoices, data.customCategories]);
 
   return (
     <div className="vg-page">
@@ -2665,7 +2787,7 @@ function ExpensesPage({ data, mutate, toast }) {
       )}
 
       <div className="vg-filter-chips">
-        {[["all", "All"], ...EXPENSE_CATEGORIES.map((c) => [c, c])].map(([v, label]) => (
+        {[["all", "All"], ...EXPENSE_CATEGORIES.map((c) => [c, c]), ...(data.customCategories?.expense || []).map((c) => [c, c])].map(([v, label]) => (
           <button key={v} className={`vg-chip ${categoryFilter === v ? "vg-chip--active" : ""}`} onClick={() => setCategoryFilter(v)}>{label}</button>
         ))}
       </div>
@@ -2708,7 +2830,7 @@ function ExpensesPage({ data, mutate, toast }) {
         {form && (
           <div className="vg-form-grid">
             <Field label="Category">
-              <StatusSelect value={form.category} options={EXPENSE_CATEGORIES} onChange={(v) => setForm({ ...form, category: v })} />
+              <CategorySelect value={form.category} builtIn={EXPENSE_CATEGORIES} custom={data.customCategories?.expense} onChange={(v) => setForm({ ...form, category: v })} onAddCategory={(name) => addCustomCategory(mutate, "expense", name)} onDeleteCategory={(name) => removeCustomCategory(mutate, "expense", name)} />
             </Field>
             <Field label="Description"><input className="vg-input" placeholder="e.g. Gimbal hire — Otieno wedding" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
             <Field label="Amount"><input className="vg-input" type="number" placeholder="0" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
@@ -3708,7 +3830,7 @@ export default function App() {
     if (!authed || !email) return;
     (async () => {
       const savedData = await loadStudioData(email);
-      const initial = savedData ? { gear: [], expenses: [], equipment: [], hires: [], ...savedData } : seedData();
+      const initial = savedData ? { gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...savedData } : seedData();
       lastSyncedRef.current = stableStringify(initial);
       setData(initial);
     })();
@@ -3724,7 +3846,7 @@ export default function App() {
       const json = stableStringify(remoteData);
       if (json === lastSyncedRef.current) return; // our own save echoed back
       lastSyncedRef.current = json;
-      setData({ gear: [], expenses: [], equipment: [], hires: [], ...remoteData });
+      setData({ gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...remoteData });
     });
     return unsubscribe;
   }, [authed, email]);
@@ -4046,6 +4168,14 @@ const CSS = `
 .vg-select { appearance: none; background: var(--c-bg-elev); border: 1px solid var(--c-border); border-radius: 9px; padding: 9px 30px 9px 12px; color: var(--c-text); font-size: 13px; font-family: 'Inter', sans-serif; cursor: pointer; outline: none; width: 100%; transition: border-color 0.15s ease; }
 .vg-select:focus { border-color: var(--c-gold); }
 .vg-select-chevron { position: absolute; right: 10px; pointer-events: none; color: var(--c-muted); }
+
+.vg-category-select { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.vg-category-select .vg-select-wrap { width: 100%; }
+.vg-category-add-row { display: flex; align-items: center; gap: 6px; animation: vg-fade-in 0.15s ease both; }
+.vg-category-add-row .vg-input { flex: 1; }
+.vg-category-manage { display: flex; flex-direction: column; gap: 4px; background: var(--c-surface-2); border: 1px solid var(--c-border-soft); border-radius: 10px; padding: 8px; animation: vg-fade-in 0.15s ease both; }
+.vg-category-manage-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px; font-size: 13px; border-radius: 7px; }
+.vg-category-manage-row:hover { background: var(--c-bg-elev); }
 
 .vg-search { display: flex; align-items: center; gap: 8px; background: var(--c-bg-elev); border: 1px solid var(--c-border); border-radius: 9px; padding: 8px 12px; color: var(--c-muted); width: 220px; }
 .vg-search input { background: none; border: none; outline: none; color: var(--c-text); font-size: 13px; width: 100%; font-family: 'Inter', sans-serif; }

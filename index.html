@@ -843,9 +843,13 @@ function Dashboard({ data, onNavigate }) {
   const { clients, bookings, projects, invoices, payments, quotations, expenses, gear, hires } = data;
   const go = (page, filter) => onNavigate && onNavigate(page, filter);
 
+  const [trendModalOpen, setTrendModalOpen] = useState(false);
+  const [trendYear, setTrendYear] = useState(() => new Date().getFullYear());
+  const [monthDetail, setMonthDetail] = useState(null); // { year, month } — month is 0-indexed
+
   /* Equipment hire invoices are split out and kept out of every other
      dashboard figure — revenue collected, outstanding, overdue, net profit,
-     the invoice-status donut and the revenue trend all reflect bookings/
+     the revenue trend and the expenditure donut all reflect bookings/
      projects/other services only. Equipment's own collected/outstanding
      numbers live solely in the dedicated Equipment profit card below. */
   const equipmentInvoices = useMemo(() => invoices.filter((i) => !!i.hireId), [invoices]);
@@ -856,6 +860,9 @@ function Dashboard({ data, onNavigate }) {
   const equipmentProfit = useMemo(() => equipmentInvoices.reduce((s, i) => s + Number(i.paid || 0), 0), [equipmentInvoices]);
   const equipmentOutstanding = useMemo(() => equipmentInvoices.reduce((s, i) => s + (Number(i.total || 0) - Number(i.paid || 0)), 0), [equipmentInvoices]);
 
+  // Revenue collected — pulled straight from payments recorded against paid
+  // invoices, so this figure (and everything derived from it below) always
+  // traces back to actual money received, not just invoiced amounts.
   const revenueCollected = useMemo(() => otherInvoices.reduce((s, i) => s + Number(i.paid || 0), 0), [otherInvoices]);
   const outstanding = useMemo(() => otherInvoices.reduce((s, i) => s + (Number(i.total || 0) - Number(i.paid || 0)), 0), [otherInvoices]);
   const totalCosts = useMemo(() => (expenses || []).reduce((s, e) => s + Number(e.amount || 0), 0), [expenses]);
@@ -871,29 +878,71 @@ function Dashboard({ data, onNavigate }) {
   const gearConflicts = useMemo(() => computeGearConflicts(bookings, gear || []), [bookings, gear]);
   const hasAlerts = overdueInvoices.length > 0 || expiredQuotes.length > 0 || gearConflicts.length > 0;
 
+  // Mini chart on the dashboard card — full current year, Jan through Dec,
+  // built from the same revenue-collected payments as the KPI above.
+  const currentYear = new Date().getFullYear();
   const trend = useMemo(() => {
-    const months = ["Mar", "Apr", "May", "Jun", "Jul", "Aug"];
-    const totals = Object.fromEntries(months.map((m) => [m, 0]));
+    const totals = Array(12).fill(0);
     otherPayments.forEach((p) => {
-      const m = monthLabel(p.date);
-      if (m in totals) totals[m] += Number(p.amount || 0);
+      if (!p.date) return;
+      const d = new Date(p.date + "T00:00:00");
+      if (d.getFullYear() !== currentYear) return;
+      totals[d.getMonth()] += Number(p.amount || 0);
     });
-    return months.map((m) => ({ month: m, value: totals[m] }));
-  }, [otherPayments]);
+    return totals.map((value, m) => ({ month: new Date(currentYear, m, 1).toLocaleDateString("en-US", { month: "short" }), value }));
+  }, [otherPayments, currentYear]);
 
-  const invoiceStatusData = useMemo(() => {
-    const buckets = { paid: 0, partial: 0, unpaid: 0 };
-    otherInvoices.forEach((i) => { buckets[i.status] = (buckets[i.status] || 0) + Number(i.total || 0); });
-    return [
-      { name: "Paid", value: buckets.paid, color: "var(--c-good)" },
-      { name: "Partial", value: buckets.partial, color: "var(--c-gold)" },
-      { name: "Unpaid", value: buckets.unpaid, color: "var(--c-muted-strong)" },
-    ].filter((d) => d.value > 0);
-  }, [otherInvoices]);
+  // Full year-by-year breakdown for the "View year" drill-down — revenue
+  // collected, expenditure logged and the resulting profit, per month.
+  const yearOverview = useMemo(() => {
+    return Array.from({ length: 12 }, (_, m) => {
+      const prefix = `${trendYear}-${String(m + 1).padStart(2, "0")}`;
+      const revenue = otherPayments.filter((p) => p.date && p.date.startsWith(prefix)).reduce((s, p) => s + Number(p.amount || 0), 0);
+      const expenditure = (expenses || []).filter((e) => e.date && e.date.startsWith(prefix)).reduce((s, e) => s + Number(e.amount || 0), 0);
+      return { month: m, label: new Date(trendYear, m, 1).toLocaleDateString("en-US", { month: "long" }), revenue, expenditure, profit: revenue - expenditure };
+    });
+  }, [trendYear, otherPayments, expenses]);
+
+  // Transaction-level breakdown for whichever month is drilled into —
+  // who paid what, and where the money went.
+  const monthTransactions = useMemo(() => {
+    if (!monthDetail) return null;
+    const prefix = `${monthDetail.year}-${String(monthDetail.month + 1).padStart(2, "0")}`;
+    const monthPayments = otherPayments
+      .filter((p) => p.date && p.date.startsWith(prefix))
+      .map((p) => {
+        const invoice = data.invoices.find((i) => i.id === p.invoiceId);
+        const client = data.clients.find((c) => c.id === p.clientId);
+        return { ...p, invoiceNumber: invoice?.number, clientName: client ? client.name : "—" };
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    const monthExpenses = (expenses || [])
+      .filter((e) => e.date && e.date.startsWith(prefix))
+      .map((e) => {
+        const project = data.projects.find((p) => p.id === e.projectId);
+        return { ...e, projectTitle: project?.title };
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    return { monthPayments, monthExpenses };
+  }, [monthDetail, otherPayments, expenses, data.invoices, data.clients, data.projects]);
+
+  // Expenditure by category — same rounded donut style the dashboard used
+  // for invoice status, now showing where money actually went, in a
+  // distinct warm palette so it never reads as revenue.
+  const EXPENSE_DONUT_COLORS = ["#c1554a", "#d9793f", "#b8894a", "#a5573f", "#8a6c53", "#b23b58"];
+  const expenditureByCategory = useMemo(() => {
+    const map = {};
+    (expenses || []).forEach((e) => { map[e.category] = (map[e.category] || 0) + Number(e.amount || 0); });
+    return Object.entries(map)
+      .map(([name, value], i) => ({ name, value, color: EXPENSE_DONUT_COLORS[i % EXPENSE_DONUT_COLORS.length] }))
+      .filter((d) => d.value > 0)
+      .sort((a, b) => b.value - a.value);
+  }, [expenses]);
 
   const kpis = [
     { label: "Revenue collected", value: fmtMoney(revenueCollected), icon: Coins, tone: "gold", page: "invoices", filter: "paid", pageLabel: "Invoices" },
-    { label: "Net profit", value: fmtMoney(netProfit), icon: PiggyBank, tone: netProfit >= 0 ? "gold" : "danger", page: "bookings", pageLabel: "Bookings" },
+    { label: "Net profit", value: fmtMoney(netProfit), icon: PiggyBank, tone: netProfit >= 0 ? "gold" : "danger", page: "expenses", pageLabel: "Expenditure" },
+    { label: "Total costs", value: fmtMoney(totalCosts), icon: Receipt, tone: "warn", page: "expenses", pageLabel: "Expenditure" },
     { label: "Outstanding", value: fmtMoney(outstanding), icon: PiggyBank, tone: "warn", page: "invoices", filter: "outstanding", pageLabel: "Invoices" },
     { label: "Overdue", value: fmtMoney(overdueInvoices.reduce((s, i) => s + (i.total - i.paid), 0)), icon: AlertTriangle, tone: overdueInvoices.length ? "danger" : "plain", page: "invoices", filter: "overdue", pageLabel: "Invoices" },
     { label: "Active projects", value: activeProjects, icon: FolderKanban, tone: "plain", page: "projects", filter: "active", pageLabel: "Projects" },
@@ -974,13 +1023,14 @@ function Dashboard({ data, onNavigate }) {
 
       <div className="vg-dash-grid">
         <div className="vg-card vg-chart-card">
-          <div className="vg-card-head">
+          <div className="vg-card-head vg-card-head--split">
             <div>
               <h3>Revenue trend</h3>
-              <p>Payments received per month</p>
+              <p>Revenue collected per month · {currentYear}</p>
             </div>
+            <button type="button" className="vg-btn vg-btn--sm" onClick={() => setTrendModalOpen(true)}>View full year</button>
           </div>
-          <div className="vg-chart-wrap">
+          <div className="vg-chart-wrap vg-chart-wrap--clickable" onClick={() => setTrendModalOpen(true)} title="Click to see every month, with profit and expenditure">
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={trend} margin={{ top: 10, right: 12, left: -12, bottom: 0 }}>
                 <defs>
@@ -1001,26 +1051,26 @@ function Dashboard({ data, onNavigate }) {
         </div>
 
         <div className="vg-card vg-donut-card">
-          <div className="vg-card-head"><div><h3>Invoice status</h3><p>By value</p></div></div>
-          {invoiceStatusData.length === 0 ? (
+          <div className="vg-card-head"><div><h3>Expenditure by category</h3><p>Where costs went</p></div></div>
+          {expenditureByCategory.length === 0 ? (
             <div className="vg-empty vg-empty--tight">
-              <p>No invoices yet.</p>
+              <p>No expenditure logged yet.</p>
             </div>
           ) : (
             <>
               <div className="vg-donut-wrap">
                 <ResponsiveContainer width="100%" height={200}>
                   <PieChart>
-                    <Pie data={invoiceStatusData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={82} paddingAngle={3} strokeWidth={0}>
-                      {invoiceStatusData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    <Pie data={expenditureByCategory} dataKey="value" nameKey="name" innerRadius={58} outerRadius={82} paddingAngle={3} strokeWidth={0}>
+                      {expenditureByCategory.map((d, i) => <Cell key={i} fill={d.color} />)}
                     </Pie>
                     <Tooltip content={<DonutTooltip />} />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
               <div className="vg-legend">
-                {invoiceStatusData.map((d) => (
-                  <button type="button" className="vg-legend-row vg-legend-row--clickable" key={d.name} onClick={() => go("invoices", d.name.toLowerCase())}>
+                {expenditureByCategory.map((d) => (
+                  <button type="button" className="vg-legend-row vg-legend-row--clickable" key={d.name} onClick={() => go("expenses")}>
                     <span className="vg-legend-dot" style={{ background: d.color }} />
                     <span className="vg-legend-name">{d.name}</span>
                     <span className="vg-legend-val">{fmtMoney(d.value)}</span>
@@ -1058,14 +1108,92 @@ function Dashboard({ data, onNavigate }) {
           )}
         </div>
       </div>
+
+      <Modal open={trendModalOpen} onClose={() => setTrendModalOpen(false)} title="Revenue & expenditure by month" width={640}>
+        <div className="vg-calendar-nav" style={{ justifyContent: "center", marginBottom: 12 }}>
+          <button type="button" className="vg-icon-btn" onClick={() => setTrendYear((y) => y - 1)} aria-label="Previous year"><ChevronLeft size={16} /></button>
+          <span className="vg-calendar-month">{trendYear}</span>
+          <button type="button" className="vg-icon-btn" onClick={() => setTrendYear((y) => y + 1)} aria-label="Next year"><ChevronRight size={16} /></button>
+        </div>
+        <p className="vg-form-hint" style={{ marginBottom: 10 }}>Click any month to see who paid and where the money went.</p>
+        <div className="vg-table">
+          <div className="vg-tr vg-tr--head vg-tr--yearmonths">
+            <div className="vg-td">Month</div>
+            <div className="vg-td">Revenue</div>
+            <div className="vg-td">Expenditure</div>
+            <div className="vg-td">Profit</div>
+          </div>
+          {yearOverview.map((m) => (
+            <button
+              type="button"
+              className="vg-tr vg-tr--yearmonths vg-tr--clickable"
+              key={m.month}
+              onClick={() => setMonthDetail({ year: trendYear, month: m.month })}
+            >
+              <div className="vg-td">{m.label}</div>
+              <div className="vg-td vg-mono">{fmtMoney(m.revenue)}</div>
+              <div className="vg-td vg-mono">{fmtMoney(m.expenditure)}</div>
+              <div className={`vg-td vg-mono ${m.profit < 0 ? "vg-cell-sub--danger" : ""}`}>{fmtMoney(m.profit)}</div>
+            </button>
+          ))}
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!monthDetail}
+        onClose={() => setMonthDetail(null)}
+        title={monthDetail ? new Date(monthDetail.year, monthDetail.month, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" }) : ""}
+        width={640}
+      >
+        {monthDetail && monthTransactions && (
+          <>
+            <div className="vg-project-dates" style={{ marginBottom: 14, gap: 14 }}>
+              <span>Revenue {fmtMoney(monthTransactions.monthPayments.reduce((s, p) => s + Number(p.amount || 0), 0))}</span>
+              <span className="vg-dot-sep">·</span>
+              <span>Expenditure {fmtMoney(monthTransactions.monthExpenses.reduce((s, e) => s + Number(e.amount || 0), 0))}</span>
+            </div>
+
+            <div className="vg-card-head"><h3>Revenue — who paid</h3></div>
+            {monthTransactions.monthPayments.length === 0 ? (
+              <p className="vg-form-hint">No payments recorded this month.</p>
+            ) : (
+              <div className="vg-mini-list" style={{ marginBottom: 18 }}>
+                {monthTransactions.monthPayments.map((p) => (
+                  <div className="vg-mini-row" key={p.id}>
+                    <div className="vg-mini-row-icon"><Coins size={15} /></div>
+                    <div className="vg-mini-row-main">
+                      <strong>{p.clientName}</strong>
+                      <span>{p.invoiceNumber || "—"} · {p.note || "Payment"}</span>
+                    </div>
+                    <div className="vg-mini-row-date">{fmtMoney(p.amount)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="vg-card-head"><h3>Expenditure — where it went</h3></div>
+            {monthTransactions.monthExpenses.length === 0 ? (
+              <p className="vg-form-hint">No expenditure logged this month.</p>
+            ) : (
+              <div className="vg-mini-list">
+                {monthTransactions.monthExpenses.map((e) => (
+                  <div className="vg-mini-row" key={e.id}>
+                    <div className="vg-mini-row-icon"><Receipt size={15} /></div>
+                    <div className="vg-mini-row-main">
+                      <strong>{e.category}</strong>
+                      <span>{e.description}{e.projectTitle ? ` · ${e.projectTitle}` : ""}</span>
+                    </div>
+                    <div className="vg-mini-row-date">{fmtMoney(e.amount)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }
-
-/* Month-view booking calendar for the Dashboard — shows which days already
-   have a booking on them. Navigates one month at a time (no year jump list);
-   crossing a December/January edge just rolls the year forward or back. */
-const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function BookingCalendar({ bookings, onNavigate }) {
   const now = new Date();
@@ -3443,6 +3571,7 @@ const NAV = [
   { key: "gear", label: "Gear", icon: Package },
   { key: "equipment", label: "Equipment", icon: Camera },
   { key: "projects", label: "Projects", icon: FolderKanban },
+  { key: "expenses", label: "Expenditure", icon: Receipt },
   { key: "quotations", label: "Quotations", icon: FileText },
   { key: "invoices", label: "Invoices & Payments", icon: Wallet },
 ];
@@ -3464,6 +3593,7 @@ function Shell({ email, onLogout, theme, toggleTheme, data, mutate, toast, onExp
     gear: <GearPage data={data} mutate={mutate} toast={toast} />,
     equipment: <EquipmentPage data={data} mutate={mutate} toast={toast} />,
     projects: <ProjectsPage data={data} mutate={mutate} toast={toast} filter={pageFilter} onFilterChange={setPageFilter} />,
+    expenses: <ExpensesPage data={data} mutate={mutate} toast={toast} />,
     quotations: <QuotationsPage data={data} mutate={mutate} toast={toast} />,
     invoices: <InvoicesPage data={data} mutate={mutate} toast={toast} filter={pageFilter} onFilterChange={setPageFilter} />,
   }[active];
@@ -3843,11 +3973,12 @@ const CSS = `
 .vg-kpi-value--sub { font-size: 18px; color: var(--c-muted-strong); }
 @media (max-width: 980px) { .vg-dash-grid { grid-template-columns: 1fr; } }
 .vg-chart-wrap { margin-top: 4px; }
+.vg-chart-wrap--clickable { cursor: pointer; border-radius: 10px; transition: background 0.15s ease; }
+.vg-chart-wrap--clickable:hover { background: var(--c-surface-2); }
 
 /* ---------- dashboard: calendar + upcoming, side by side ---------- */
 .vg-dash-grid--cal { grid-template-columns: 0.95fr 1.05fr; align-items: start; }
-.vg-dash-grid--cal .vg-calendar-grid { max-width: 320px; margin-left: auto; margin-right: auto; }
-@media (max-width: 980px) { .vg-dash-grid--cal { grid-template-columns: 1fr; } .vg-dash-grid--cal .vg-calendar-grid { max-width: 360px; } }
+@media (max-width: 980px) { .vg-dash-grid--cal { grid-template-columns: 1fr; } }
 
 /* ---------- booking calendar ---------- */
 .vg-calendar-nav { display: flex; align-items: center; gap: 8px; }
@@ -3936,6 +4067,10 @@ const CSS = `
 .vg-tr--quotations { grid-template-columns: 0.9fr 1.4fr 1fr 0.9fr 0.8fr 1.7fr; }
 .vg-tr--invoices { grid-template-columns: 0.85fr 1.3fr 0.85fr 0.85fr 0.9fr 0.85fr 0.8fr 1.1fr; }
 .vg-tr--expenses { grid-template-columns: 0.8fr 0.9fr 1.5fr 1.3fr 0.8fr 0.8fr; }
+.vg-tr--yearmonths { grid-template-columns: 0.8fr 1fr 1fr 1fr; }
+.vg-tr--clickable { width: 100%; background: none; border: none; border-top: 1px solid var(--c-border-soft); cursor: pointer; font: inherit; color: inherit; text-align: left; transition: background 0.15s ease; }
+.vg-tr--clickable:first-of-type { border-top: none; }
+.vg-tr--clickable:hover { background: var(--c-surface-2); }
 .vg-tr--gear { grid-template-columns: 1.5fr 1fr 0.8fr 0.8fr; }
 .vg-tr--head { color: var(--c-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; padding-bottom: 10px; }
 .vg-td { font-size: 13.5px; min-width: 0; }

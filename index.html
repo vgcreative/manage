@@ -165,6 +165,33 @@ const daysBetween = (iso) => {
   return Math.round((now - then) / 86400000);
 };
 
+/* Booking date-range helpers. Bookings now span a start→end date instead of
+   a single date — these stay backward compatible with any older booking
+   record that only has a plain `date` field. */
+function fmtBookingDates(b) {
+  const start = b.startDate || b.date;
+  const end = b.endDate || b.date || start;
+  if (!start) return "—";
+  if (!end || end === start) return fmtDate(start);
+  return `${fmtDate(start)} → ${fmtDate(end)}`;
+}
+function bookingDateList(b) {
+  const start = b.startDate || b.date;
+  const end = b.endDate || b.date || start;
+  if (!start) return [];
+  const cur = new Date(start + "T00:00:00");
+  const last = new Date((end || start) + "T00:00:00");
+  if (isNaN(cur) || isNaN(last) || last < cur) return [start];
+  const out = [];
+  let guard = 0;
+  while (cur <= last && guard < 400) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setDate(cur.getDate() + 1);
+    guard++;
+  }
+  return out;
+}
+
 /* An invoice is overdue once its due date has passed and it still has a
    balance outstanding — paid/cancelled invoices are never overdue. */
 const isInvoiceOverdue = (inv) =>
@@ -216,15 +243,18 @@ const syncProjectWithPayment = (projects, invoiceId, paidPct) => {
 
 /* Gear double-booking: for each active (non-cancelled) booking date, tally
    how many bookings need each gear item that day and compare against how
-   many of that item the studio actually owns. */
+   many of that item the studio actually owns. Bookings that span a range
+   of dates count against every day in that range. */
 function computeGearConflicts(bookings, gear) {
   const byDateGear = {};
   bookings.forEach((b) => {
-    if (b.status === "cancelled" || !b.date || !Array.isArray(b.gearIds)) return;
-    b.gearIds.forEach((gearId) => {
-      const key = `${b.date}__${gearId}`;
-      if (!byDateGear[key]) byDateGear[key] = { date: b.date, gearId, bookings: [] };
-      byDateGear[key].bookings.push(b);
+    if (b.status === "cancelled" || !Array.isArray(b.gearIds) || b.gearIds.length === 0) return;
+    bookingDateList(b).forEach((date) => {
+      b.gearIds.forEach((gearId) => {
+        const key = `${date}__${gearId}`;
+        if (!byDateGear[key]) byDateGear[key] = { date, gearId, bookings: [] };
+        if (!byDateGear[key].bookings.some((bb) => bb.id === b.id)) byDateGear[key].bookings.push(b);
+      });
     });
   });
   const conflicts = [];
@@ -486,7 +516,7 @@ function buildReceiptHTML({ receiptNumber, date, client, invoiceNumber, amountPa
 function seedData() {
   return {
     clients: [],
-    services: [],
+    packages: [],
     bookings: [],
     projects: [],
     quotations: [],
@@ -501,6 +531,21 @@ function seedData() {
     quoteSeq: 1,
     receiptSeq: 1,
   };
+}
+
+/* Backward-compat migration for data saved before the Services→Packages
+   rename and before bookings moved from a single date to a date range.
+   Runs on every load (fresh boot, remote sync, or a restored backup) so
+   older saved data keeps working without a manual fix-up. */
+function migrateLegacyData(d) {
+  const packages = (d.packages && d.packages.length) ? d.packages : (d.services || []);
+  const bookings = (d.bookings || []).map((b) => ({
+    ...b,
+    packageId: b.packageId || b.serviceId || "",
+    startDate: b.startDate || b.date || todayISO(),
+    endDate: b.endDate || b.date || b.startDate || todayISO(),
+  }));
+  return { ...d, packages, bookings };
 }
 
 /* ------------------------------- storage ---------------------------------
@@ -989,8 +1034,8 @@ function Dashboard({ data, onNavigate }) {
   const netProfit = revenueCollected - totalCosts;
   const activeProjects = useMemo(() => projects.filter((p) => p.status !== "completed").length, [projects]);
   const upcomingShoots = useMemo(() => {
-    const now = new Date();
-    return bookings.filter((b) => b.status !== "cancelled" && new Date(b.date) >= new Date(now.toDateString())).length;
+    const now = new Date(new Date().toDateString());
+    return bookings.filter((b) => b.status !== "cancelled" && new Date((b.endDate || b.date || b.startDate) + "T00:00:00") >= now).length;
   }, [bookings]);
 
   const overdueInvoices = useMemo(() => otherInvoices.filter(isInvoiceOverdue), [otherInvoices]);
@@ -1220,7 +1265,7 @@ function Dashboard({ data, onNavigate }) {
                       <strong>{b.event}</strong>
                       <span>{c ? c.name : "—"} · {b.location}</span>
                     </div>
-                    <div className="vg-mini-row-date">{fmtDate(b.date)}</div>
+                    <div className="vg-mini-row-date">{fmtBookingDates(b)}</div>
                   </button>
                 );
               })}
@@ -1332,7 +1377,9 @@ function BookingCalendar({ bookings, onNavigate }) {
   const bookedByDate = useMemo(() => {
     const map = {};
     bookings.filter((b) => b.status !== "cancelled").forEach((b) => {
-      (map[b.date] = map[b.date] || []).push(b);
+      bookingDateList(b).forEach((date) => {
+        (map[date] = map[date] || []).push(b);
+      });
     });
     return map;
   }, [bookings]);
@@ -1525,19 +1572,19 @@ function ClientsPage({ data, mutate, toast }) {
   );
 }
 
-/* =============================== SERVICES ================================= */
+/* =============================== PACKAGES ================================= */
 
-const blankServiceForm = () => ({ name: "", category: "", description: "", price: "", duration: "", deposit: "" });
+const blankPackageForm = () => ({ name: "", category: "", description: "", price: "", duration: "", deposit: "" });
 
-function ServicesPage({ data, mutate, toast }) {
-  const [form, setForm] = useState(blankServiceForm());
+function PackagesPage({ data, mutate, toast }) {
+  const [form, setForm] = useState(blankPackageForm());
   const [editingId, setEditingId] = useState(null);
 
   const grouped = useMemo(() => {
     const map = {};
-    data.services.forEach((s) => { (map[s.category] ||= []).push(s); });
+    data.packages.forEach((s) => { (map[s.category] ||= []).push(s); });
     return map;
-  }, [data.services]);
+  }, [data.packages]);
 
   const openEdit = (s) => {
     setEditingId(s.id);
@@ -1547,11 +1594,11 @@ function ServicesPage({ data, mutate, toast }) {
     });
   };
 
-  const cancelEdit = () => { setEditingId(null); setForm(blankServiceForm()); };
+  const cancelEdit = () => { setEditingId(null); setForm(blankPackageForm()); };
 
   const save = () => {
     if (!form.name.trim() || !form.category.trim() || !form.price) {
-      toast("Name, category and price are needed to add a service.");
+      toast("Name, category and price are needed to add a package.");
       return;
     }
     const patch = {
@@ -1560,27 +1607,27 @@ function ServicesPage({ data, mutate, toast }) {
       duration: form.duration || "—", deposit: Number(form.deposit) || 0,
     };
     if (editingId) {
-      mutate((d) => ({ ...d, services: d.services.map((s) => s.id === editingId ? { ...s, ...patch } : s) }));
-      toast("Service updated");
+      mutate((d) => ({ ...d, packages: d.packages.map((s) => s.id === editingId ? { ...s, ...patch } : s) }));
+      toast("Package updated");
     } else {
-      mutate((d) => ({ ...d, services: [...d.services, { id: uid(), ...patch }] }));
-      toast("Service added");
+      mutate((d) => ({ ...d, packages: [...d.packages, { id: uid(), ...patch }] }));
+      toast("Package added");
     }
     cancelEdit();
   };
 
   const remove = (id) => {
-    mutate((d) => ({ ...d, services: d.services.filter((s) => s.id !== id) }));
+    mutate((d) => ({ ...d, packages: d.packages.filter((s) => s.id !== id) }));
     if (editingId === id) cancelEdit();
-    toast("Service removed");
+    toast("Package removed");
   };
 
   return (
     <div className="vg-page">
-      <PageHeader title="Services" subtitle="Packages, pricing and deposits" />
+      <PageHeader title="Packages" subtitle="Packages, pricing and deposits" />
 
       <div className="vg-card">
-        <div className="vg-card-head"><h3>{editingId ? "Edit service" : "Add service"}</h3></div>
+        <div className="vg-card-head"><h3>{editingId ? "Edit package" : "Add package"}</h3></div>
         <div className="vg-add-service-grid">
           <input className="vg-input" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input className="vg-input" placeholder="Category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
@@ -1589,7 +1636,7 @@ function ServicesPage({ data, mutate, toast }) {
           <input className="vg-input" placeholder="Deposit %" type="number" value={form.deposit} onChange={(e) => setForm({ ...form, deposit: e.target.value })} />
         </div>
         <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
-          <button className="vg-btn vg-btn--gold" onClick={save}><Plus size={16} />{editingId ? "Save changes" : "Add service"}</button>
+          <button className="vg-btn vg-btn--gold" onClick={save}><Plus size={16} />{editingId ? "Save changes" : "Add package"}</button>
           {editingId && <button className="vg-btn vg-btn--ghost" onClick={cancelEdit}>Cancel</button>}
         </div>
       </div>
@@ -1603,8 +1650,8 @@ function ServicesPage({ data, mutate, toast }) {
             {items.map((s) => (
               <div className="vg-service-card" key={s.id}>
                 <div className="vg-service-card-actions">
-                  <button className="vg-icon-btn" title="Edit service" onClick={() => openEdit(s)}><Pencil size={14} /></button>
-                  <button className="vg-icon-btn vg-icon-btn--danger" title="Delete service" onClick={() => remove(s.id)}><Trash2 size={14} /></button>
+                  <button className="vg-icon-btn" title="Edit package" onClick={() => openEdit(s)}><Pencil size={14} /></button>
+                  <button className="vg-icon-btn vg-icon-btn--danger" title="Delete package" onClick={() => remove(s.id)}><Trash2 size={14} /></button>
                 </div>
                 <div className="vg-service-name">{s.name}</div>
                 <div className="vg-service-desc">{s.description}</div>
@@ -1625,14 +1672,14 @@ function ServicesPage({ data, mutate, toast }) {
 
 const BOOKING_STATUSES = ["reserved", "confirmed", "completed", "cancelled"];
 
-/* Service picker for a booking — pulled straight from the Services catalogue
+/* Package picker for a booking — pulled straight from the Packages catalogue
    so a booking's price always traces back to a real package. */
-function ServiceSelect({ value, services, onChange }) {
+function PackageSelect({ value, packages, onChange }) {
   return (
     <div className="vg-select-wrap">
       <select className="vg-select" value={value || ""} onChange={(e) => onChange(e.target.value)}>
-        <option value="">No service selected</option>
-        {services.map((s) => (
+        <option value="">No package selected</option>
+        {packages.map((s) => (
           <option key={s.id} value={s.id}>{s.name} — {fmtMoney(s.price)}</option>
         ))}
       </select>
@@ -1650,25 +1697,35 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
   const [localFilter, setLocalFilter] = useState(filter || "all");
   const [clientMode, setClientMode] = useState("existing");
   const [newClient, setNewClient] = useState(blankNewClient());
+  const [packageMode, setPackageMode] = useState("existing");
+  const [newPackage, setNewPackage] = useState(blankPackageForm());
 
   useEffect(() => { setLocalFilter(filter || "all"); }, [filter]);
 
   const openNew = () => {
     setForm({
       id: uid(), event: "", category: "Custom", clientId: data.clients[0]?.id || "",
-      date: todayISO(), location: "", status: "reserved", gearIds: [], serviceId: "",
+      startDate: todayISO(), endDate: todayISO(), location: "", status: "reserved", gearIds: [], packageId: "",
       expenses: [],
     });
     setClientMode(data.clients.length ? "existing" : "new");
     setNewClient(blankNewClient());
+    setPackageMode("existing");
+    setNewPackage(blankPackageForm());
     setIsNewBooking(true);
     setModalOpen(true);
   };
   const openEdit = (b) => {
     const linkedExpenses = data.expenses.filter((e) => e.bookingId === b.id).map((e) => ({ ...e, amount: String(e.amount) }));
-    setForm({ ...b, gearIds: b.gearIds || [], serviceId: b.serviceId || "", expenses: linkedExpenses });
+    setForm({
+      ...b, gearIds: b.gearIds || [], packageId: b.packageId || b.serviceId || "",
+      startDate: b.startDate || b.date || todayISO(), endDate: b.endDate || b.date || todayISO(),
+      expenses: linkedExpenses,
+    });
     setClientMode("existing");
     setNewClient(blankNewClient());
+    setPackageMode("existing");
+    setNewPackage(blankPackageForm());
     setIsNewBooking(false);
     setModalOpen(true);
   };
@@ -1680,8 +1737,8 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
      expenses still live in the same data.expenses collection everything
      else (dashboard totals, profit) already reads from. */
   const upsertBookingAndExpenses = (d, f) => {
-    const svc = data.services.find((s) => s.id === f.serviceId);
-    const cleanBooking = { ...f, category: svc ? svc.category : f.category };
+    const pkg = d.packages.find((s) => s.id === f.packageId);
+    const cleanBooking = { ...f, category: pkg ? pkg.category : f.category };
     delete cleanBooking.expenses;
     const bookings = isNew(f.id)
       ? [cleanBooking, ...d.bookings]
@@ -1699,6 +1756,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
 
   const save = () => {
     if (!form.event.trim()) { toast("Add an event name."); return; }
+    if (!form.startDate || !form.endDate || form.endDate < form.startDate) { toast("Check the booking dates."); return; }
 
     let clientId = form.clientId;
     let newClientRecord = null;
@@ -1709,14 +1767,35 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
     }
     if (!clientId) { toast("Pick or add a client for this booking."); return; }
 
-    const bookingForm = { ...form, clientId };
-    const svc = data.services.find((s) => s.id === bookingForm.serviceId);
+    // A package is entirely optional on a booking — picking one (existing or
+    // brand new) is what triggers the auto-invoice below; leaving it blank
+    // just saves the booking with no package attached.
+    let packageId = form.packageId;
+    let newPackageRecord = null;
+    if (packageMode === "new") {
+      if (!newPackage.name.trim()) { toast("Enter a name for the new package."); return; }
+      if (!newPackage.price || Number(newPackage.price) <= 0) { toast("Enter a price for the new package."); return; }
+      packageId = uid();
+      newPackageRecord = {
+        id: packageId,
+        name: newPackage.name.trim(),
+        category: newPackage.category.trim() || "Custom",
+        description: newPackage.description || "",
+        price: Number(newPackage.price) || 0,
+        duration: newPackage.duration || "—",
+        deposit: Number(newPackage.deposit) || 0,
+      };
+    }
+
+    const bookingForm = { ...form, clientId, packageId };
+    const svc = newPackageRecord || data.packages.find((s) => s.id === packageId);
     const alreadyInvoiced = !!bookingForm.invoiceId;
 
     mutate((d) => {
       const withClient = newClientRecord ? { ...d, clients: [newClientRecord, ...d.clients] } : d;
-      const withBooking = upsertBookingAndExpenses(withClient, bookingForm);
-      // Auto-send to Invoices & Payments the first time a service is picked —
+      const withPackage = newPackageRecord ? { ...withClient, packages: [newPackageRecord, ...withClient.packages] } : withClient;
+      const withBooking = upsertBookingAndExpenses(withPackage, bookingForm);
+      // Auto-send to Invoices & Payments the first time a package is picked —
       // if it's already been invoiced once, saving again just updates the
       // booking/expenses and leaves the existing invoice alone.
       if (!svc || alreadyInvoiced) return withBooking;
@@ -1731,7 +1810,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
       };
       const project = makeProjectFromInvoice({
         client, title: `${bookingForm.event}${client ? ` — ${client.name}` : ""}`,
-        shootDate: bookingForm.date, invoiceId, bookingId: bookingForm.id,
+        shootDate: bookingForm.startDate, invoiceId, bookingId: bookingForm.id,
       });
       return {
         ...withBooking,
@@ -1742,11 +1821,9 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
       };
     });
 
-    toast(
-      newClientRecord
-        ? (!svc ? "Client added to CRM and booking saved" : alreadyInvoiced ? "Client added to CRM and booking updated" : "Client added to CRM — booking saved, invoice and project created")
-        : (!svc ? "Booking saved" : alreadyInvoiced ? "Booking updated" : "Booking saved — invoice and project created")
-    );
+    const addedBits = [newClientRecord && "client added to CRM", newPackageRecord && "package added"].filter(Boolean);
+    const action = alreadyInvoiced ? "booking updated" : svc ? "booking saved — invoice and project created" : "booking saved";
+    toast(addedBits.length ? `${addedBits.join(" and ")} — ${action}` : action[0].toUpperCase() + action.slice(1));
     setModalOpen(false);
   };
 
@@ -1781,7 +1858,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
   const visibleBookings = useMemo(() => {
     if (localFilter === "upcoming") {
       const now = new Date(new Date().toDateString());
-      return data.bookings.filter((b) => b.status !== "cancelled" && new Date(b.date) >= now);
+      return data.bookings.filter((b) => b.status !== "cancelled" && new Date((b.endDate || b.date || b.startDate) + "T00:00:00") >= now);
     }
     return data.bookings;
   }, [data.bookings, localFilter]);
@@ -1829,7 +1906,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
             <div className="vg-tr vg-tr--head vg-tr--bookings">
               <div className="vg-td vg-td--wide">Event</div>
               <div className="vg-td vg-td--wide">Client</div>
-              <div className="vg-td">Date</div>
+              <div className="vg-td">Dates</div>
               <div className="vg-td vg-td--wide">Location</div>
               <div className="vg-td">Status</div>
               <div className="vg-td">Update</div>
@@ -1847,7 +1924,7 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
                     {b.invoiceId && <div className="vg-cell-sub">Invoiced</div>}
                   </div>
                   <div className="vg-td vg-td--wide">{client ? client.name : "—"}</div>
-                  <div className="vg-td">{fmtDate(b.date)}</div>
+                  <div className="vg-td">{fmtBookingDates(b)}</div>
                   <div className="vg-td vg-td--wide">{b.location}</div>
                   <div className="vg-td"><StatusPill status={b.status} /></div>
                   <div className="vg-td">
@@ -1878,11 +1955,31 @@ function BookingsPage({ data, mutate, toast, filter, onFilterChange, onNavigate 
               onNewClientChange={setNewClient}
             />
             {clientMode === "new" && <p className="vg-form-hint">This client will be added to your CRM automatically when you save the booking.</p>}
-            <Field label="Date"><input className="vg-input" type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+            <div className="vg-form-row">
+              <Field label="Start date"><input className="vg-input" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} /></Field>
+              <Field label="End date"><input className="vg-input" type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} /></Field>
+            </div>
             <Field label="Location"><input className="vg-input" value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} /></Field>
-            <Field label="Service">
-              <ServiceSelect value={form.serviceId} services={data.services} onChange={(v) => setForm({ ...form, serviceId: v })} />
-              {form.serviceId && !form.invoiceId && (
+            <Field label="Package (optional)">
+              <div className="vg-filter-chips vg-filter-chips--tabs">
+                <button className={`vg-chip ${packageMode === "existing" ? "vg-chip--active" : ""}`} onClick={() => setPackageMode("existing")}>Existing package</button>
+                <button className={`vg-chip ${packageMode === "new" ? "vg-chip--active" : ""}`} onClick={() => setPackageMode("new")}>New package</button>
+              </div>
+              {packageMode === "existing" ? (
+                <PackageSelect value={form.packageId} packages={data.packages} onChange={(v) => setForm({ ...form, packageId: v })} />
+              ) : (
+                <div className="vg-form-grid" style={{ gap: 8 }}>
+                  <div className="vg-add-service-grid">
+                    <input className="vg-input" placeholder="Package name" value={newPackage.name} onChange={(e) => setNewPackage({ ...newPackage, name: e.target.value })} />
+                    <input className="vg-input" placeholder="Category" value={newPackage.category} onChange={(e) => setNewPackage({ ...newPackage, category: e.target.value })} />
+                    <input className="vg-input" placeholder="Price (KES)" type="number" value={newPackage.price} onChange={(e) => setNewPackage({ ...newPackage, price: e.target.value })} />
+                    <input className="vg-input" placeholder="Duration" value={newPackage.duration} onChange={(e) => setNewPackage({ ...newPackage, duration: e.target.value })} />
+                    <input className="vg-input" placeholder="Deposit %" type="number" value={newPackage.deposit} onChange={(e) => setNewPackage({ ...newPackage, deposit: e.target.value })} />
+                  </div>
+                  <p className="vg-form-hint">This will be added to your Packages list and used for this booking.</p>
+                </div>
+              )}
+              {(packageMode === "existing" ? !!form.packageId : (newPackage.name.trim() && Number(newPackage.price) > 0)) && !form.invoiceId && (
                 <div className="vg-cell-sub" style={{ marginTop: 6 }}>Saving will automatically send this to Invoices &amp; Payments.</div>
               )}
               {form.invoiceId && (
@@ -2930,7 +3027,7 @@ function QuotationsPage({ data, mutate, toast }) {
       const eventTitle = (q.items && q.items[0]?.description) || `Booking — ${client ? client.name : "Client"}`;
       const booking = {
         id: bookingId, event: eventTitle, category: "Custom", clientId: q.clientId,
-        date: todayISO(), location: "", status: "confirmed", gearIds: [], serviceId: "",
+        startDate: todayISO(), endDate: todayISO(), location: "", status: "confirmed", gearIds: [], packageId: "",
         quotationId: q.id,
       };
       const invoiceId = uid();
@@ -3106,11 +3203,11 @@ function QuotationsPage({ data, mutate, toast }) {
                   <input className="vg-input" placeholder="Description" value={it.description} onChange={(e) => setItem(it.id, { description: e.target.value })} />
                   <div className="vg-select-wrap">
                     <select className="vg-select" value="" onChange={(e) => {
-                      const svc = data.services.find((s) => s.id === e.target.value);
-                      if (svc) setItem(it.id, { description: svc.name, price: svc.price, qty: 1 });
+                      const pkg = data.packages.find((s) => s.id === e.target.value);
+                      if (pkg) setItem(it.id, { description: pkg.name, price: pkg.price, qty: 1 });
                     }}>
                       <option value="">Select…</option>
-                      {data.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      {data.packages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
                     <ChevronDown size={14} className="vg-select-chevron" />
                   </div>
@@ -3201,10 +3298,10 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
     return form.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
   }, [form]);
 
-  const pickService = (itemId, serviceId) => {
-    const svc = data.services.find((s) => s.id === serviceId);
-    if (!svc) return;
-    setItem(itemId, { description: svc.name, price: svc.price, qty: 1 });
+  const pickPackage = (itemId, packageId) => {
+    const pkg = data.packages.find((s) => s.id === packageId);
+    if (!pkg) return;
+    setItem(itemId, { description: pkg.name, price: pkg.price, qty: 1 });
   };
 
   const createInvoice = () => {
@@ -3563,9 +3660,9 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
                 <div className="vg-items-row" key={it.id}>
                   <input className="vg-input" placeholder="Description" value={it.description} onChange={(e) => setItem(it.id, { description: e.target.value })} />
                   <div className="vg-select-wrap">
-                    <select className="vg-select" value="" onChange={(e) => pickService(it.id, e.target.value)}>
+                    <select className="vg-select" value="" onChange={(e) => pickPackage(it.id, e.target.value)}>
                       <option value="">Select…</option>
-                      {data.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      {data.packages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
                     <ChevronDown size={14} className="vg-select-chevron" />
                   </div>
@@ -3689,7 +3786,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: Aperture },
   { key: "clients", label: "Clients (CRM)", icon: Users },
-  { key: "services", label: "Services", icon: Sparkles },
+  { key: "packages", label: "Packages", icon: Sparkles },
   { key: "bookings", label: "Bookings", icon: CalendarDays },
   { key: "gear", label: "Gear", icon: Package },
   { key: "equipment", label: "Equipment", icon: Camera },
@@ -3711,7 +3808,7 @@ function Shell({ email, onLogout, theme, toggleTheme, data, mutate, toast, onExp
   const Page = {
     dashboard: <Dashboard data={data} onNavigate={navigate} />,
     clients: <ClientsPage data={data} mutate={mutate} toast={toast} />,
-    services: <ServicesPage data={data} mutate={mutate} toast={toast} />,
+    packages: <PackagesPage data={data} mutate={mutate} toast={toast} />,
     bookings: <BookingsPage data={data} mutate={mutate} toast={toast} filter={pageFilter} onFilterChange={setPageFilter} onNavigate={navigate} />,
     gear: <GearPage data={data} mutate={mutate} toast={toast} />,
     equipment: <EquipmentPage data={data} mutate={mutate} toast={toast} />,
@@ -3831,7 +3928,7 @@ export default function App() {
     if (!authed || !email) return;
     (async () => {
       const savedData = await loadStudioData(email);
-      const initial = savedData ? { gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...savedData } : seedData();
+      const initial = savedData ? migrateLegacyData({ gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...savedData }) : seedData();
       lastSyncedRef.current = stableStringify(initial);
       setData(initial);
     })();
@@ -3847,7 +3944,7 @@ export default function App() {
       const json = stableStringify(remoteData);
       if (json === lastSyncedRef.current) return; // our own save echoed back
       lastSyncedRef.current = json;
-      setData({ gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...remoteData });
+      setData(migrateLegacyData({ gear: [], expenses: [], equipment: [], hires: [], customCategories: { gear: [], equipment: [], expense: [] }, ...remoteData }));
     });
     return unsubscribe;
   }, [authed, email]);
@@ -3882,7 +3979,7 @@ export default function App() {
       try {
         const parsed = JSON.parse(reader.result);
         if (!parsed || !Array.isArray(parsed.clients)) throw new Error("bad shape");
-        setData(parsed);
+        setData(migrateLegacyData(parsed));
         toast("Backup restored");
       } catch (e) {
         toast("That file doesn't look like a VG Creative backup.");
@@ -4239,7 +4336,7 @@ const CSS = `
   .vg-td--actions, .vg-td--actions-wide { grid-column: 1 / -1; justify-content: flex-start; }
 }
 
-/* ---------- services ---------- */
+/* ---------- packages ---------- */
 .vg-service-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 @media (max-width: 900px) { .vg-service-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) { .vg-service-grid { grid-template-columns: 1fr; } }
@@ -4418,3 +4515,4 @@ createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
+

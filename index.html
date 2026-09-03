@@ -1470,6 +1470,128 @@ function PageHeader({ title, subtitle, action }) {
   );
 }
 
+/* ================================ LEADS =================================== */
+
+/* Booking requests submitted from the public website's contact form.
+   Lives in its own `leads` table (not the studio_data JSON blob) because
+   the site inserts into it anonymously — see the RLS policy that only
+   allows `anon` to INSERT, never read/update/delete. This page reads and
+   manages it live via Supabase directly, same DB, separate table. */
+function LeadsPage({ mutate, toast }) {
+  const [leads, setLeads] = useState(null); // null = still loading
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    supabase
+      .from("leads")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .then(({ data: rows, error }) => {
+        if (!alive) return;
+        if (error) { console.error("Leads load failed", error); setLeads([]); return; }
+        setLeads(rows || []);
+      });
+
+    const channel = supabase
+      .channel("leads_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "leads" }, (payload) => {
+        setLeads((prev) => {
+          if (!prev) return prev;
+          if (payload.eventType === "INSERT") return [payload.new, ...prev];
+          if (payload.eventType === "UPDATE") return prev.map((l) => (l.id === payload.new.id ? payload.new : l));
+          if (payload.eventType === "DELETE") return prev.filter((l) => l.id !== payload.old.id);
+          return prev;
+        });
+      })
+      .subscribe();
+
+    return () => { alive = false; supabase.removeChannel(channel); };
+  }, []);
+
+  const setStatus = async (lead, status) => {
+    const { error } = await supabase.from("leads").update({ status }).eq("id", lead.id);
+    if (error) { toast("Couldn't update that lead — try again."); return; }
+    toast(status === "contacted" ? "Marked as contacted" : "Marked as converted");
+  };
+
+  const convertToClient = (lead) => {
+    mutate((d) => ({
+      ...d,
+      clients: [
+        { id: uid(), name: lead.name || "Untitled lead", type: "Individual", email: "", phone: lead.phone || "", kraPin: "", source: "Website", added: todayISO() },
+        ...d.clients,
+      ],
+    }));
+    setStatus(lead, "converted");
+    toast("Added to Clients");
+  };
+
+  const remove = async (lead) => {
+    if (!window.confirm("Remove this lead? This can't be undone.")) return;
+    const { error } = await supabase.from("leads").delete().eq("id", lead.id);
+    if (error) toast("Couldn't remove that lead.");
+  };
+
+  const filtered = (leads || []).filter((l) =>
+    ((l.name || "") + (l.phone || "") + (l.package || "")).toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    <div className="vg-page">
+      <PageHeader title="Leads" subtitle="Booking requests from the website, newest first" />
+
+      <div className="vg-card vg-card--grow">
+        <div className="vg-card-head vg-card-head--split">
+          <h3>All leads ({filtered.length})</h3>
+          <div className="vg-search">
+            <Search size={15} />
+            <input placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+        </div>
+
+        {leads === null ? (
+          <div className="vg-empty vg-empty--tight"><Loader2 size={20} className="vg-spin-icon" /></div>
+        ) : filtered.length === 0 ? (
+          <EmptyState icon={Send} title="No leads yet" body="When someone books a package on the website, it shows up here automatically." />
+        ) : (
+          <div className="vg-table">
+            <div className="vg-tr vg-tr--head vg-tr--leads">
+              <div className="vg-td vg-td--wide">Name</div>
+              <div className="vg-td">Phone</div>
+              <div className="vg-td vg-td--wide">Package</div>
+              <div className="vg-td">Status</div>
+              <div className="vg-td">Received</div>
+              <div className="vg-td vg-td--actions" />
+            </div>
+            {filtered.map((l) => (
+              <div className="vg-tr vg-tr--leads" key={l.id}>
+                <div className="vg-td vg-td--wide">
+                  <div className="vg-cell-title">{l.name || "—"}</div>
+                  {l.project_details && <div className="vg-cell-sub">{l.project_details}</div>}
+                </div>
+                <div className="vg-td vg-mono">{l.phone || "—"}</div>
+                <div className="vg-td vg-td--wide">{l.package || "—"}</div>
+                <div className="vg-td"><StatusPill status={l.status || "new"} /></div>
+                <div className="vg-td">{fmtDate(l.created_at)}</div>
+                <div className="vg-td vg-td--actions">
+                  {l.status !== "contacted" && l.status !== "converted" && (
+                    <button className="vg-icon-btn" title="Mark contacted" onClick={() => setStatus(l, "contacted")}><Send size={15} /></button>
+                  )}
+                  {l.status !== "converted" && (
+                    <button className="vg-icon-btn" title="Add as client" onClick={() => convertToClient(l)}><Users size={15} /></button>
+                  )}
+                  <button className="vg-icon-btn vg-icon-btn--danger" title="Remove" onClick={() => remove(l)}><Trash2 size={15} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* =============================== CLIENTS ================================= */
 
 function ClientsPage({ data, mutate, toast }) {
@@ -3785,6 +3907,7 @@ function InvoicesPage({ data, mutate, toast, filter, onFilterChange }) {
 
 const NAV = [
   { key: "dashboard", label: "Dashboard", icon: Aperture },
+  { key: "leads", label: "Leads", icon: Send },
   { key: "clients", label: "Clients (CRM)", icon: Users },
   { key: "packages", label: "Packages", icon: Sparkles },
   { key: "bookings", label: "Bookings", icon: CalendarDays },
@@ -3807,6 +3930,7 @@ function Shell({ email, onLogout, theme, toggleTheme, data, mutate, toast, onExp
 
   const Page = {
     dashboard: <Dashboard data={data} onNavigate={navigate} />,
+    leads: <LeadsPage mutate={mutate} toast={toast} />,
     clients: <ClientsPage data={data} mutate={mutate} toast={toast} />,
     packages: <PackagesPage data={data} mutate={mutate} toast={toast} />,
     bookings: <BookingsPage data={data} mutate={mutate} toast={toast} filter={pageFilter} onFilterChange={setPageFilter} onNavigate={navigate} />,
@@ -4285,12 +4409,16 @@ const CSS = `
 .vg-pill--completed, .vg-pill--paid, .vg-pill--accepted, .vg-pill--returned, .vg-pill--available { background: rgba(78,159,110,0.14); color: #7fcb9a; border-color: rgba(78,159,110,0.3); }
 .vg-pill--cancelled, .vg-pill--overdue, .vg-pill--expired { background: rgba(193,85,74,0.14); color: #e39089; border-color: rgba(193,85,74,0.3); }
 .vg-pill--partial, .vg-pill--draft, .vg-pill--invoiced, .vg-pill--unpaid, .vg-pill--maintenance { background: rgba(201,162,75,0.1); color: var(--c-warn); border-color: rgba(201,162,75,0.25); }
+.vg-pill--new { background: rgba(90,140,220,0.14); color: #8fb4ea; border-color: rgba(90,140,220,0.3); }
+.vg-pill--contacted { background: rgba(201,162,75,0.14); color: var(--c-gold-bright); border-color: rgba(201,162,75,0.3); }
+.vg-pill--converted { background: rgba(78,159,110,0.14); color: #7fcb9a; border-color: rgba(78,159,110,0.3); }
 
 /* ---------- tables ---------- */
 .vg-table { display: flex; flex-direction: column; }
 .vg-tr { display: grid; gap: 10px; align-items: center; padding: 14px 6px; border-top: 1px solid var(--c-border-soft); }
 .vg-tr:first-child { border-top: none; }
 .vg-tr--clients { grid-template-columns: 1.5fr 1.7fr 0.9fr 0.8fr 0.9fr 0.7fr; }
+.vg-tr--leads { grid-template-columns: 1.8fr 1fr 1.3fr 0.9fr 0.9fr 0.8fr; }
 .vg-tr--bookings { grid-template-columns: 1.1fr 1.3fr 0.8fr 1.4fr 0.8fr 1fr auto; }
 .vg-tr--quotations { grid-template-columns: 0.9fr 1.4fr 1fr 0.9fr 0.8fr 1.7fr; }
 .vg-tr--invoices { grid-template-columns: 0.85fr 1.3fr 0.85fr 0.85fr 0.9fr 0.85fr 0.8fr 1.1fr; }
